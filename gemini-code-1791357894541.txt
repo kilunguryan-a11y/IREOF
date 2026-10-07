@@ -1,5 +1,157 @@
-streamlit
-pandas
-numpy
-plotly
-streamlit-folium
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import folium
+from streamlit_folium import st_folium
+
+# Page Config
+st.set_page_config(page_title="IREOF Framework Dashboard", layout="wide")
+
+st.title("⚡ Integrated Renewable Energy Optimization Framework (IREOF)")
+st.caption("Coordinating Generation, Storage, and Grid Infrastructure for a Resilient Power System")
+
+# --- SIDEBAR: INTERACTIVE CONTROLS ---
+st.sidebar.header("🎛️ Scenario Parameters")
+
+st.sidebar.subheader("1. Generation Potential")
+solar_capacity = st.sidebar.slider("Solar PV Capacity (MW)", 0, 300, 100, step=10)
+wind_capacity = st.sidebar.slider("Wind Turbine Capacity (MW)", 0, 300, 50, step=10)
+
+st.sidebar.subheader("2. Battery Energy Storage (BESS)")
+bess_capacity = st.sidebar.slider("Storage Capacity (MWh)", 0, 500, 150, step=10)
+bess_power = st.sidebar.slider("BESS Power Rating (MW)", 0, 200, 50, step=5)
+
+st.sidebar.subheader("3. Grid & Interconnection Constraints")
+grid_limit = st.sidebar.slider("Grid Injection Limit / Substation Cap (MW)", 50, 400, 120, step=10)
+
+# --- SIMULATION LOGIC ---
+hours = np.arange(24)
+
+# Profiles (24-hour cycle)
+solar_profile = np.maximum(0, np.sin((hours - 6) * np.pi / 12)) * solar_capacity
+wind_profile = (0.4 + 0.3 * np.cos((hours - 2) * np.pi / 12) + 0.1 * np.random.randn(24)) * wind_capacity
+wind_profile = np.clip(wind_profile, 0, wind_capacity)
+
+total_gen = solar_profile + wind_profile
+
+# Battery Logic & Curtailment Calculations
+bess_soc = np.zeros(24)
+grid_injection = np.zeros(24)
+curtailed_power = np.zeros(24)
+bess_activity = np.zeros(24)
+
+current_soc = bess_capacity * 0.2
+
+for h in range(24):
+    power_avail = total_gen[h]
+    
+    if power_avail > grid_limit:
+        excess = power_avail - grid_limit
+        charge_possible = min(excess, bess_power, bess_capacity - current_soc)
+        current_soc += charge_possible
+        bess_activity[h] = -charge_possible
+        curtailed = excess - charge_possible
+        curtailed_power[h] = max(0, curtailed)
+        grid_injection[h] = grid_limit
+    else:
+        deficit = grid_limit - power_avail
+        discharge_possible = min(deficit, bess_power, current_soc)
+        current_soc -= discharge_possible
+        bess_activity[h] = discharge_possible
+        grid_injection[h] = power_avail + discharge_possible
+        
+    bess_soc[h] = current_soc
+
+# Key Metrics Top Row
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total Daily Energy Yield", f"{int(total_gen.sum())} MWh")
+col2.metric("Energy Injected to Grid", f"{int(grid_injection.sum())} MWh")
+col3.metric("Curtailment Avoided via BESS", f"{int(abs(bess_activity[bess_activity < 0].sum()))} MWh")
+col4.metric("Total Curtailed Energy", f"{int(curtailed_power.sum())} MWh", delta_color="inverse")
+
+st.divider()
+
+# --- MAIN DASHBOARD LAYOUT ---
+map_col, chart_col = st.columns([1, 1])
+
+with map_col:
+    st.subheader("📍 Interactive Spatial GIS Layer")
+    st.markdown("Substation interconnections, resource potential, and infrastructure bottlenecks.")
+    
+    # Regional Grid Node Location
+    m = folium.Map(location=[-0.5, 37.0], zoom_start=8, tiles="OpenStreetMap")
+    
+    # Substation Node
+    folium.Marker(
+        [-0.5, 37.0],
+        popup=f"<b>Primary Substation Node</b><br>Capacity Limit: {grid_limit} MW",
+        icon=folium.Icon(color="red", icon="flash"),
+    ).add_to(m)
+    
+    # Solar Site
+    folium.CircleMarker(
+        [-0.4, 36.8],
+        radius=int(solar_capacity / 10) + 5,
+        popup=f"Solar PV Site ({solar_capacity} MW)",
+        color="orange",
+        fill=True,
+        fill_opacity=0.6,
+    ).add_to(m)
+    
+    # Wind Site
+    folium.CircleMarker(
+        [-0.6, 37.2],
+        radius=int(wind_capacity / 10) + 5,
+        popup=f"Wind Farm Site ({wind_capacity} MW)",
+        color="blue",
+        fill=True,
+        fill_opacity=0.6,
+    ).add_to(m)
+    
+    # Grid Lines
+    folium.PolyLine(
+        [[-0.4, 36.8], [-0.5, 37.0], [-0.6, 37.2]],
+        color="darkblue",
+        weight=3,
+        dash_array="5, 5",
+    ).add_to(m)
+    
+    st_folium(m, width=600, height=420)
+
+with chart_col:
+    st.subheader("📈 24-Hour Co-Optimization & Dispatch Profile")
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=hours, y=solar_profile, name="Solar PV Generation", line=dict(color="orange", width=2)))
+    fig.add_trace(go.Scatter(x=hours, y=wind_profile, name="Wind Generation", line=dict(color="blue", width=2)))
+    fig.add_trace(go.Scatter(x=hours, y=grid_injection, name="Grid Injected Power", line=dict(color="green", width=3)))
+    fig.add_trace(go.Scatter(x=hours, y=[grid_limit]*24, name="Substation Threshold", line=dict(color="red", dash="dash")))
+    fig.add_trace(go.Bar(x=hours, y=curtailed_power, name="Curtailed Energy", marker_color="gray", opacity=0.5))
+    
+    fig.update_layout(
+        xaxis_title="Hour of Day",
+        yaxis_title="Power Output (MW)",
+        margin=dict(l=20, r=20, t=30, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+st.divider()
+
+# --- BESS STATE OF CHARGE TRACKER ---
+st.subheader("🔋 BESS Charge/Discharge & State-of-Charge (SoC)")
+soc_col1, soc_col2 = st.columns(2)
+
+with soc_col1:
+    fig_soc = go.Figure()
+    fig_soc.add_trace(go.Scatter(x=hours, y=bess_soc, fill='tozeroy', name="Battery Energy (MWh)", line=dict(color="purple")))
+    fig_soc.update_layout(xaxis_title="Hour of Day", yaxis_title="State of Charge (MWh)", height=250, margin=dict(l=20, r=20, t=10, b=20))
+    st.plotly_chart(fig_soc, use_container_width=True)
+
+with soc_col2:
+    fig_act = go.Figure()
+    colors = ['green' if val > 0 else 'red' for val in bess_activity]
+    fig_act.add_trace(go.Bar(x=hours, y=bess_activity, marker_color=colors, name="Discharge (+) / Charge (-)"))
+    fig_act.update_layout(xaxis_title="Hour of Day", yaxis_title="BESS Action (MW)", height=250, margin=dict(l=20, r=20, t=10, b=20))
+    st.plotly_chart(fig_act, use_container_width=True)
